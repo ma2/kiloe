@@ -779,10 +779,17 @@ void editorDelChar() {
 
   erow *row = &E.row[E.cy];
   if (E.cx > 0) {
-    editorRowDelChar(row, E.cx - 1);
-    E.cx--;
+    // UTF-8文字境界を考慮して削除
+    int prev_pos = move_to_prev_char(row->chars, E.cx);
+    int delete_bytes = E.cx - prev_pos;
+    
+    // マルチバイト文字全体を削除
+    for (int i = 0; i < delete_bytes; i++) {
+      editorRowDelChar(row, prev_pos);
+    }
+    E.cx = prev_pos;
   } else {
-    // 行頭でのBS→現在行を全行の後ろにアペンドする
+    // 行頭でのBS→現在行を前行の後ろにアペンドする
     E.cx = E.row[E.cy - 1].size;
     editorRowAppendString(&E.row[E.cy - 1], row->chars, row->size);
     editorDelRow(E.cy);
@@ -1156,8 +1163,15 @@ char *editorPrompt(char *prompt, void (*callback)(char *, int)) {
 
     int c = editorReadKey();
     if (c == DELETE || c == CTRL_KEY('h') || c == BACKSPACE) {
-      // バッファ内でBSを有効にする
-      if (buflen != 0) buf[--buflen] = '\0';
+      // バッファ内でBSを有効にする（UTF-8文字境界を考慮）
+      if (buflen != 0) {
+        // UTF-8文字の先頭を探す
+        buflen--;
+        while (buflen > 0 && is_utf8_continuation((unsigned char)buf[buflen])) {
+          buflen--;
+        }
+        buf[buflen] = '\0';
+      }
     } else if (c == ESC) {
       // ESCを入力したらバッファをクリア
       editorSetStatusMessage("");
@@ -1171,7 +1185,10 @@ char *editorPrompt(char *prompt, void (*callback)(char *, int)) {
         if (callback) callback(buf, c);
         return buf;
       }
-    } else if (!iscntrl(c) && c < 128) {
+    } else if (c == ARROW_UP || c == ARROW_DOWN || c == ARROW_LEFT || c == ARROW_RIGHT) {
+      // カーソルキーをコールバックに渡す（検索で使用）
+      if (callback) callback(buf, c);
+    } else if (!iscntrl(c) || (unsigned char)c >= 0x80) {
       if (buflen == bufsize - 1) {
         // バッファがいっぱいなったら倍に拡張
         bufsize *= 2;
