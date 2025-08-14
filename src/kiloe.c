@@ -1,153 +1,22 @@
-/** includes */
+/**
+ * kiloe.c - Kiloeエディタの残り機能
+ * 
+ * Phase 1で分割されていない機能群：
+ * - 設定管理
+ * - シンタックスハイライト
+ * - バッファ操作
+ * - エディタ操作
+ * - ファイルI/O
+ * - 検索機能  
+ * - 画面描画
+ * - 入力処理
+ */
 
-#define _DEFAULT_SOURCE
-#define _BSD_SOURCE
-#define _GNU_SOURCE
+#include "kiloe.h"
 
-#include <ctype.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <stdarg.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/ioctl.h>
-#include <sys/types.h>
-#include <termios.h>
-#include <time.h>
-#include <unistd.h>
+/* ここから、Phase1で分割されていない機能の実装 */
 
-/** defines */
-
-#define KILO_VERSION "0.0.1"
-#define KILO_TAB_STOP (Config.tab_stop)
-#define KILO_QUIT_TIMES (Config.quit_times)
-
-#define CTRL_KEY(k) ((k) & 0x1f) // Ctrlキーを押したときの値を取得
-#define ESC '\x1b'
-#define SPC ' '
-
-enum editorKey {
-  BACKSPACE = 127,
-  ARROW_LEFT = 1000,
-  ARROW_RIGHT,
-  ARROW_UP,
-  ARROW_DOWN,
-  DELETE,
-  HOME,
-  END,
-  PAGE_UP,
-  PAGE_DOWN
-};
-
-// ハイライト情報
-enum editorHighLight {
-  HL_NORMAL = 0,
-  HL_COMMENT,
-  HL_MLCOMMENT,
-  HL_KEYWORD1,
-  HL_KEYWORD2,
-  HL_STRING,
-  HL_NUMBER,
-  HL_MATCH
-};
-
-#define HL_HIGHLIGHT_NUMBERS (1<<0) // 0ビット目が1のフラグ
-#define HL_HIGHLIGHT_STRINGS (1<<1) // 1ビット目が1のフラグ
-
-/** data */
-
-struct editorSyntax {
-  char *filetype;
-  char **filematch;
-  char **keywords;
-  char *singleline_comment_start;
-  char *multiline_comment_start;
-  char *multiline_comment_end;
-  int flags;
-};
-
-typedef struct erow {
-  int idx;
-  int size;     // charsのサイズ
-  int rsize;    // renderのサイズ
-  char *chars;  // 文字列のバッファ
-  char *render; // 実際にレンダリングした結果のバッファ（TABを複数スペースに展開等）
-  unsigned char *hl;  // render内の各文字のハイライト情報の配列
-  int hl_open_comment;  // 前の行のコメントが閉じていない
-} erow;
-
-struct editorConfig {
-  int cx, cy;     // カーソル位置
-  int rx;         // renderでのカーソル位置
-  int rowoff;     // 行オフセット
-  int coloff;     // 列オフセット
-  int screenrows; // 画面の行数
-  int screencols; // 画面の列数
-  int numrows;
-  erow *row;      // 編集中の行バッファへのポインタ
-  int dirty;      // テキストバッファが変更されているどうか
-  char *filename; // 編集中ファイル名
-  char statusmsg[80];
-  time_t statusmsg_time;
-  struct editorSyntax *syntax;
-  struct termios orig_termios; // 元の端末設定
-};
-
-struct editorConfig E;
-
-/** settings */
-
-struct editorSettings {
-  // エディタ設定
-  int tab_stop;
-  int quit_times;
-  int show_line_numbers;
-  
-  // 表示設定
-  char welcome_message[256];
-  int status_timeout;
-  
-  // カラー設定
-  int color_comment;
-  int color_keyword1;
-  int color_keyword2;
-  int color_string;
-  int color_number;
-  int color_match;
-};
-
-struct editorSettings Config;
-
-/** filetypes */
-
-char *C_HL_extensions[] = { ".c", ".h", ".cpp", NULL };
-
-char *C_HL_Keywords[] = {
-  "switch", "if", "while", "for", "break", "continue", "return", "else",
-  "struct", "union", "typedef", "static", "enum", "class", "case",
-  "int|", "long|", "double|", "float|", "char|", "unsigned|", "signed|",
-  "void|", NULL
-};
-
-struct editorSyntax HLDB[] = {
-  {
-    "c",
-    C_HL_extensions,
-    C_HL_Keywords,
-    "//", "/*", "*/",
-    HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS
-  },
-};
-
-// HLDB配列長
-#define HLDB_ENTRIES (sizeof(HLDB) / sizeof(HLDB[0]))
-
-/** prototypes */
-
-void editorSetStatusMessage(const char *fmt, ...);
-void editorRefreshScreen();
-char *editorPrompt(char *prompt, void (*callback)(char *, int));
+/* Phase1で分割していない機能の実装開始 */
 
 /** settings */
 
@@ -238,187 +107,9 @@ int loadConfig(const char *filename) {
     return 0;
 }
 
-/** UTF-8 helpers */
+/* UTF-8機能はutf8.cに移動済み */
 
-// UTF-8の継続バイトかチェック
-static inline int is_utf8_continuation(unsigned char c) {
-    return (c & 0xC0) == 0x80;
-}
-
-// 次の文字境界へ移動
-int move_to_next_char(char *str, int pos, int max) {
-    if (pos >= max) return max;
-    pos++;
-    // 継続バイトをスキップ
-    while (pos < max && is_utf8_continuation((unsigned char)str[pos])) {
-        pos++;
-    }
-    return pos;
-}
-
-// 前の文字境界へ移動
-int move_to_prev_char(char *str, int pos) {
-    if (pos <= 0) return 0;
-    pos--;
-    // 文字の先頭を探す
-    while (pos > 0 && is_utf8_continuation((unsigned char)str[pos])) {
-        pos--;
-    }
-    return pos;
-}
-
-// UTF-8文字の表示幅を取得
-int get_char_width(char *str, int pos) {
-    unsigned char c = (unsigned char)str[pos];
-    
-    // ASCII文字は1幅
-    if (c < 0x80) return 1;
-    
-    // 3バイトUTF-8（多くの日本語文字）は2幅
-    if ((c & 0xF0) == 0xE0) return 2;
-    
-    // 2バイトと4バイトUTF-8は1幅（簡易実装）
-    return 1;
-}
-
-/** terminal */
-
-void die(const char *s) {
-  write(STDERR_FILENO, "\x1b[2J", 4); // 画面をクリア
-  write(STDERR_FILENO, "\x1b[H", 3);  // カーソルをホーム位置に移動
-  perror(s);
-  exit(1);
-}
-
-void disableRawMode() {
-  // 元の端末設定に戻す
-  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &E.orig_termios) == -1) {
-    die("tcsetattr");
-  }
-}
-
-void enableRawMode() {
-  // 端末状態取得
-  if (tcgetattr(STDIN_FILENO, &E.orig_termios) == -1) {
-    die("tcgetattr");
-  }
-  atexit(disableRawMode); // プログラム終了時に元の設定に戻す
-
-  // 端末設定をrawモードに変更（以下のフラグをOFFにする）
-  // ICRNL: 改行をキャリッジリターンに変換
-  // IXON: ソフトフローコントロール（Ctrl-S/Q）を有効化
-  // OPOST: 出力の後処理（改行変換など）を無効化
-  // ECHO: 入力文字を表示
-  // ICANON: 入力を行単位で処理
-  // ISIG: シグナル(Ctrl-X/Z）を有効化
-  // IEXTEN: 拡張機能（Ctrl-Vなど）を有効化
-  struct termios raw = E.orig_termios;
-  raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
-  raw.c_oflag &= ~(OPOST);
-  raw.c_cflag |= (CS8);
-  raw.c_lflag &= ~(ECHO | ICANON | ISIG | IEXTEN);
-  raw.c_cc[VMIN] = 0; // 最小入力文字数
-  raw.c_cc[VTIME] = 1; // タイムアウト（100ms）
-
-  // 端末状態設定
-  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) {
-    die("tcsetattr");
-  }
-}
-
-// キーの読み込み
-int editorReadKey() {
-  int nread;
-  char c;
-  while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
-    if (nread == -1 && errno != EAGAIN) {
-      die("read");
-    }
-  }
-
-  // 特殊キー（エスケープシーケンス）の処理
-  if (c == ESC) {
-    char seq[3];
-
-    if (read(STDIN_FILENO, &seq[0], 1) != 1) return ESC;
-    if (read(STDIN_FILENO, &seq[1], 1) != 1) return ESC;
-
-    // HOMEやENDは、OSによってシーケンスが異なるので複数ある
-    if (seq[0] == '[') {
-      if (seq[1] >= '0' && seq[1] <= '9') {
-        if (read(STDIN_FILENO, &seq[2], 1) != 1) return ESC;
-        if (seq[2] == '~') {
-          switch (seq[1]) {
-            case '1': return HOME;
-            case '3': return DELETE;
-            case '4': return END;
-            case '5': return PAGE_UP;
-            case '6': return PAGE_DOWN;
-            case '7': return HOME;
-            case '8': return END;
-          }
-        }
-      } else {
-        switch (seq[1]) {
-          case 'A': return ARROW_UP;
-          case 'B': return ARROW_DOWN;
-          case 'C': return ARROW_RIGHT;
-          case 'D': return ARROW_LEFT;
-          case 'H': return HOME;
-          case 'F': return END;
-        }
-      }
-    } else if (seq[0] == '0') {
-      switch (seq[1]) {
-        case 'H': return HOME;
-        case 'F': return END;
-      }
-    }
-    return ESC;
-  } else {
-    return c;
-  }
-}
-
-int getCursorPosition(int *rows, int *cols) {
-  char buf[32];
-  unsigned int i = 0;
-
-  // カーソル位置問い合わせ
-  if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4) return -1;
-
-  // 戻り値もエスケープシーケンス
-  // ESC[行;列R
-  while (i < sizeof(buf) - 1) {
-    if (read(STDIN_FILENO, &buf[i], 1) != 1) break;
-    if (buf[i] == 'R') break;
-    i++;
-  }
-  buf[i] = '\0';
-
-  // エスケープシーケンスじゃなければエラー
-  if (buf[0] != ESC || buf[1] != '[') return -1;
-  if (sscanf(&buf[2], "%2d;%2d", rows, cols) != 2) return -1;
-
-  return 0;
-}
-
-int getWindowSize(int *rows, int *cols) {
-  struct winsize ws;
-  
-  // ioctlでターミナルのサイズが分からなかった場合
-  // 999,999にカーソルを移動して（つまりターミナル右下の）座標を取得する
-  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
-    if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12) {
-      return -1;
-    }
-    return getCursorPosition(rows, cols);
-  } else {
-    *rows = ws.ws_row;
-    *cols = ws.ws_col;
-    return 0; // 成功
-  }
-}
+/* Terminal機能はterminal.cに移動済み */
 
 /** syntax highlighting */
 
@@ -920,22 +611,28 @@ void editorFindCallback(char *query, int key) {
     else if (current == E.numrows) current = 0;
 
     erow *row = &E.row[current];
-    char *match = strstr(row->render, query);
-    if (match) {
+    
+    // charsバッファ内で検索（マルチバイト文字対応）
+    char *chars_match = strstr(row->chars, query);
+    if (chars_match) {
       last_match = current;
       E.cy = current;
-      // match - row->renderはrender内でのmatchまでのバイト数=rxになる
-      E.cx = editorRowRxToCx(row, match - row->render);
+      // charsバッファ内での位置をそのまま使用
+      E.cx = chars_match - row->chars;
       // マッチした行を先頭にする
       E.rowoff = E.numrows;
 
-      // ハイライト前の状態を保存
-      saved_hl_line = current;
-      saved_hl = malloc(row->rsize);
-      memcpy(saved_hl, row->hl, row->rsize);
+      // ハイライト表示のためのrenderバッファ内位置を計算
+      char *render_match = strstr(row->render, query);
+      if (render_match) {
+        // ハイライト前の状態を保存
+        saved_hl_line = current;
+        saved_hl = malloc(row->rsize);
+        memcpy(saved_hl, row->hl, row->rsize);
 
-      // findした文字列をハイライト
-      memset(&row->hl[match - row->render], HL_MATCH, strlen(query));
+        // findした文字列をハイライト
+        memset(&row->hl[render_match - row->render], HL_MATCH, strlen(query));
+      }
       break;
     }
   }
@@ -963,22 +660,9 @@ void editorFind() {
 
 /** append buffer */
 
-struct abuf {
-  char *b;
-  int len;
-};
-
-#define ABUF_INIT {NULL, 0}
-
-// アペンドバッファに文字列sを追加
-// abuf: アペンドバッファ情報
-// s: 文字列
-// len: 文字列長
 void abAppend(struct abuf *ab, const char *s, int len) {
-  // 元のバッファを拡張
   char *new = realloc(ab->b, ab->len + len);
   if (new == NULL) return;
-  // 拡張したところにsをコピー
   memcpy(&new[ab->len], s, len);
   ab->b = new;
   ab->len += len;
@@ -1343,54 +1027,4 @@ void editorProcessKeypress() {
   quit_times = Config.quit_times;
 }
 
-/** init */
-
-void initEditor() {
-  // デフォルト設定を読み込み
-  initDefaultConfig();
-  
-  // 設定ファイルを探索・読み込み
-  if (loadConfig("kiloe.conf") != 0) {
-    // カレントディレクトリになければホームディレクトリを探索
-    char config_path[256];
-    const char *home = getenv("HOME");
-    if (home) {
-      snprintf(config_path, sizeof(config_path), "%s/.kiloe.conf", home);
-      loadConfig(config_path);
-    }
-  }
-  
-  E.cx = 0;
-  E.cy = 0;
-  E.rx = 0;
-  E.rowoff = 0;
-  E.coloff = 0;
-  E.numrows = 0;
-  E.row = NULL;
-  E.dirty = 0;
-  E.filename = NULL;
-  E.statusmsg[0] = '\0';
-  E.statusmsg_time = 0;
-  E.syntax = NULL;
-
-  if (getWindowSize(&E.screenrows, &E.screencols) == -1) {
-    die("getWindowSize");
-  }
-  E.screenrows -= 2;  // ステータス行、メッセージ行を確保
-}
-
-int main(int argc, char *argv[]) {
-  enableRawMode();
-  initEditor();
-  if (argc >= 2) {
-    editorOpen(argv[1]);
-  }
-
-  editorSetStatusMessage("HELP: Ctrl-s = save | Ctrl-q = quit | Ctrl-f = find");
-
-  while (1) {
-    editorRefreshScreen();
-    editorProcessKeypress();
-  }
-  return 0;
-}
+/* main関数とinitEditor関数はmain.cに移動済み */
