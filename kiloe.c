@@ -20,8 +20,8 @@
 /** defines */
 
 #define KILO_VERSION "0.0.1"
-#define KILO_TAB_STOP 8
-#define KILO_QUIT_TIMES 3
+#define KILO_TAB_STOP (Config.tab_stop)
+#define KILO_QUIT_TIMES (Config.quit_times)
 
 #define CTRL_KEY(k) ((k) & 0x1f) // Ctrlキーを押したときの値を取得
 #define ESC '\x1b'
@@ -96,6 +96,29 @@ struct editorConfig {
 
 struct editorConfig E;
 
+/** settings */
+
+struct editorSettings {
+  // エディタ設定
+  int tab_stop;
+  int quit_times;
+  int show_line_numbers;
+  
+  // 表示設定
+  char welcome_message[256];
+  int status_timeout;
+  
+  // カラー設定
+  int color_comment;
+  int color_keyword1;
+  int color_keyword2;
+  int color_string;
+  int color_number;
+  int color_match;
+};
+
+struct editorSettings Config;
+
 /** filetypes */
 
 char *C_HL_extensions[] = { ".c", ".h", ".cpp", NULL };
@@ -125,6 +148,95 @@ struct editorSyntax HLDB[] = {
 void editorSetStatusMessage(const char *fmt, ...);
 void editorRefreshScreen();
 char *editorPrompt(char *prompt, void (*callback)(char *, int));
+
+/** settings */
+
+// デフォルト設定を初期化
+void initDefaultConfig() {
+    // エディタ設定
+    Config.tab_stop = 8;
+    Config.quit_times = 3;
+    Config.show_line_numbers = 0;
+    
+    // 表示設定
+    strcpy(Config.welcome_message, "Kilo editor -- version 0.0.1");
+    Config.status_timeout = 5;
+    
+    // カラー設定
+    Config.color_comment = 36;      // シアン
+    Config.color_keyword1 = 33;     // 黄色
+    Config.color_keyword2 = 32;     // 緑
+    Config.color_string = 35;       // マゼンタ
+    Config.color_number = 31;       // 赤
+    Config.color_match = 34;        // 青
+}
+
+// 文字列をtrueまたはfalseとして解釈
+int parseBool(const char *value) {
+    if (strcmp(value, "true") == 0 || strcmp(value, "1") == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+// 設定ファイルを読み込み
+int loadConfig(const char *filename) {
+    FILE *fp = fopen(filename, "r");
+    if (!fp) return -1;
+    
+    char line[256];
+    while (fgets(line, sizeof(line), fp)) {
+        // コメント行と空行をスキップ
+        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
+        
+        // = で分割
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        
+        *eq = '\0';
+        char *key = line;
+        char *value = eq + 1;
+        
+        // 改行文字を削除
+        char *newline = strchr(value, '\n');
+        if (newline) *newline = '\0';
+        newline = strchr(value, '\r');
+        if (newline) *newline = '\0';
+        
+        // 先頭と末尾の空白を削除
+        while (*key == ' ' || *key == '\t') key++;
+        while (*value == ' ' || *value == '\t') value++;
+        
+        // 設定値を適用
+        if (strcmp(key, "tab_stop") == 0) {
+            Config.tab_stop = atoi(value);
+        } else if (strcmp(key, "quit_times") == 0) {
+            Config.quit_times = atoi(value);
+        } else if (strcmp(key, "show_line_numbers") == 0) {
+            Config.show_line_numbers = parseBool(value);
+        } else if (strcmp(key, "welcome_message") == 0) {
+            strncpy(Config.welcome_message, value, sizeof(Config.welcome_message) - 1);
+            Config.welcome_message[sizeof(Config.welcome_message) - 1] = '\0';
+        } else if (strcmp(key, "status_timeout") == 0) {
+            Config.status_timeout = atoi(value);
+        } else if (strcmp(key, "color_comment") == 0) {
+            Config.color_comment = atoi(value);
+        } else if (strcmp(key, "color_keyword1") == 0) {
+            Config.color_keyword1 = atoi(value);
+        } else if (strcmp(key, "color_keyword2") == 0) {
+            Config.color_keyword2 = atoi(value);
+        } else if (strcmp(key, "color_string") == 0) {
+            Config.color_string = atoi(value);
+        } else if (strcmp(key, "color_number") == 0) {
+            Config.color_number = atoi(value);
+        } else if (strcmp(key, "color_match") == 0) {
+            Config.color_match = atoi(value);
+        }
+    }
+    
+    fclose(fp);
+    return 0;
+}
 
 /** terminal */
 
@@ -407,12 +519,12 @@ void editorUpdateSyntax(erow *row) {
 int editorSyntaxToColor(int hl) {
   switch (hl) {
     case HL_COMMENT:
-    case HL_MLCOMMENT: return 36;   // シアン
-    case HL_KEYWORD1: return 33;  // 黄色
-    case HL_KEYWORD2: return 32;  // 緑
-    case HL_STRING: return 35;    // マゼンタ
-    case HL_NUMBER: return 31;    // 赤
-    case HL_MATCH: return 34;     // 青
+    case HL_MLCOMMENT: return Config.color_comment;
+    case HL_KEYWORD1: return Config.color_keyword1;
+    case HL_KEYWORD2: return Config.color_keyword2;
+    case HL_STRING: return Config.color_string;
+    case HL_NUMBER: return Config.color_number;
+    case HL_MATCH: return Config.color_match;
     default: return 37;
   }
 }
@@ -840,7 +952,7 @@ void editorDrawRows(struct abuf *ab) {
     if (filerow >= E.numrows) {
       if (E.numrows == 0 && y == E.screenrows / 3) {
         char welcome[80];
-        int welcomelen = snprintf(welcome, sizeof(welcome), "Kilo editor -- version %s", KILO_VERSION);
+        int welcomelen = snprintf(welcome, sizeof(welcome), "%s", Config.welcome_message);
         if (welcomelen > E.screencols) welcomelen = E.screencols;
         // 画面中央にwelcome表示
         int padding = (E.screencols - welcomelen) / 2;
@@ -931,7 +1043,7 @@ void editorDrawMessageBar(struct abuf *ab) {
   abAppend(ab, "\x1b[K", 3);
   int msglen = strlen(E.statusmsg);
   if (msglen > E.screencols) msglen = E.screencols;
-  if (msglen && time(NULL) - E.statusmsg_time < 5) {
+  if (msglen && time(NULL) - E.statusmsg_time < Config.status_timeout) {
     abAppend(ab, E.statusmsg, msglen);
   }
 }
@@ -1054,7 +1166,8 @@ void editorMoveCursor(int key) {
 }
 
 void editorProcessKeypress() {
-  static int quit_times = KILO_QUIT_TIMES;
+  static int quit_times = -1;  // 未初期化を示すため-1を使用
+  if (quit_times == -1) quit_times = Config.quit_times;
   int c = editorReadKey();
   switch (c) {
     case '\r':
@@ -1133,12 +1246,26 @@ void editorProcessKeypress() {
       break;
   }
 
-  quit_times = KILO_QUIT_TIMES;
+  quit_times = Config.quit_times;
 }
 
 /** init */
 
 void initEditor() {
+  // デフォルト設定を読み込み
+  initDefaultConfig();
+  
+  // 設定ファイルを探索・読み込み
+  if (loadConfig("kiloe.conf") != 0) {
+    // カレントディレクトリになければホームディレクトリを探索
+    char config_path[256];
+    const char *home = getenv("HOME");
+    if (home) {
+      snprintf(config_path, sizeof(config_path), "%s/.kiloe.conf", home);
+      loadConfig(config_path);
+    }
+  }
+  
   E.cx = 0;
   E.cy = 0;
   E.rx = 0;
