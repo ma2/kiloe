@@ -238,6 +238,49 @@ int loadConfig(const char *filename) {
     return 0;
 }
 
+/** UTF-8 helpers */
+
+// UTF-8の継続バイトかチェック
+static inline int is_utf8_continuation(unsigned char c) {
+    return (c & 0xC0) == 0x80;
+}
+
+// 次の文字境界へ移動
+int move_to_next_char(char *str, int pos, int max) {
+    if (pos >= max) return max;
+    pos++;
+    // 継続バイトをスキップ
+    while (pos < max && is_utf8_continuation((unsigned char)str[pos])) {
+        pos++;
+    }
+    return pos;
+}
+
+// 前の文字境界へ移動
+int move_to_prev_char(char *str, int pos) {
+    if (pos <= 0) return 0;
+    pos--;
+    // 文字の先頭を探す
+    while (pos > 0 && is_utf8_continuation((unsigned char)str[pos])) {
+        pos--;
+    }
+    return pos;
+}
+
+// UTF-8文字の表示幅を取得
+int get_char_width(char *str, int pos) {
+    unsigned char c = (unsigned char)str[pos];
+    
+    // ASCII文字は1幅
+    if (c < 0x80) return 1;
+    
+    // 3バイトUTF-8（多くの日本語文字）は2幅
+    if ((c & 0xF0) == 0xE0) return 2;
+    
+    // 2バイトと4バイトUTF-8は1幅（簡易実装）
+    return 1;
+}
+
 /** terminal */
 
 void die(const char *s) {
@@ -561,12 +604,20 @@ void editorSelectSyntaxHighlight() {
 // chars内カーソル位置をrender内カーソル位置に変換
 int editorRowCxToRx(erow *row, int cx) {
   int rx = 0;
-  int j;
-  for(j = 0; j < cx; j++) {
+  int j = 0;
+  
+  while (j < cx && j < row->size) {
     if (row->chars[j] == '\t') {
       rx += (KILO_TAB_STOP - 1) - (rx % KILO_TAB_STOP);
+      rx++;
+      j++;
+    } else {
+      // UTF-8文字の表示幅を考慮
+      int char_width = get_char_width(row->chars, j);
+      rx += char_width;
+      // 次の文字の開始位置へ移動
+      j = move_to_next_char(row->chars, j, row->size);
     }
-    rx++;
   }
   return rx;
 }
@@ -574,11 +625,22 @@ int editorRowCxToRx(erow *row, int cx) {
 // render内カーソル位置をchars内カーソル位置に変換
 int editorRowRxToCx(erow *row, int rx) {
   int cur_rx = 0;
-  int cx;
-  for (cx = 0; cx < row->size; cx++) {
-    if (row->chars[cx] == '\t') cur_rx += (KILO_TAB_STOP - 1) - (cur_rx % KILO_TAB_STOP);
-    cur_rx++;
-    if (cur_rx > rx) return cx;
+  int cx = 0;
+  
+  while (cx < row->size) {
+    if (row->chars[cx] == '\t') {
+      cur_rx += (KILO_TAB_STOP - 1) - (cur_rx % KILO_TAB_STOP);
+      cur_rx++;
+      if (cur_rx > rx) return cx;
+      cx++;
+    } else {
+      // UTF-8文字の表示幅を考慮
+      int char_width = get_char_width(row->chars, cx);
+      if (cur_rx + char_width > rx) return cx;
+      cur_rx += char_width;
+      // 次の文字の開始位置へ移動
+      cx = move_to_next_char(row->chars, cx, row->size);
+    }
   }
   return cx;
 }
@@ -974,7 +1036,8 @@ void editorDrawRows(struct abuf *ab) {
       int current_color = -1;
       int j;
       for (j = 0; j < len; j++) {
-        if (iscntrl(c[j])) {
+        // UTF-8の場合、0x80以上のバイトは制御文字ではない
+        if ((unsigned char)c[j] < 0x80 && iscntrl(c[j])) {
           // 制御コードの場合
           char sym = (c[j] <= 26) ? '@' + c[j] : '?';
           abAppend(ab, "\x1b[7m", 4);
@@ -991,7 +1054,6 @@ void editorDrawRows(struct abuf *ab) {
             abAppend(ab, "\x1b[39m", 5);
             current_color = -1;
           }
-          abAppend(ab, "\x1b[39m", 5);
           abAppend(ab, &c[j], 1);
         } else {
           int color = editorSyntaxToColor(hl[j]);
@@ -1130,7 +1192,8 @@ void editorMoveCursor(int key) {
   switch(key) {
     case ARROW_LEFT:
       if (E.cx != 0) {
-        E.cx--;
+        // UTF-8文字境界を考慮して前の文字へ移動
+        E.cx = move_to_prev_char(row->chars, E.cx);
       } else if (E.cy > 0) {
         // 行頭で←を押したら、前行の行末に移動
         E.cy--;
@@ -1140,7 +1203,8 @@ void editorMoveCursor(int key) {
     case ARROW_RIGHT:
     // カーソルは行端より右には移動しない
       if (row && E.cx < row->size) {
-        E.cx++;
+        // UTF-8文字境界を考慮して次の文字へ移動
+        E.cx = move_to_next_char(row->chars, E.cx, row->size);
       } else if (row && E.cx == row->size) {
         // 行末で→を押したら、次行の先頭に移動
         E.cy++;
@@ -1148,15 +1212,28 @@ void editorMoveCursor(int key) {
       }
       break;
     case ARROW_UP:
-      if (E.cy != 0) {
-        E.cy--;
-      }
-      break;
-    case ARROW_DOWN:
+    case ARROW_DOWN: {
+      // 上下移動時は現在の表示位置(rx)を記憶
+      int target_rx = E.rx;
       if (E.cy < E.numrows) {
+        target_rx = editorRowCxToRx(&E.row[E.cy], E.cx);
+      }
+      
+      if (key == ARROW_UP && E.cy != 0) {
+        E.cy--;
+      } else if (key == ARROW_DOWN && E.cy < E.numrows) {
         E.cy++;
       }
+      
+      // 新しい行で同じ表示位置に最も近いバイト位置を計算
+      row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];
+      if (row) {
+        E.cx = editorRowRxToCx(row, target_rx);
+      } else {
+        E.cx = 0;
+      }
       break;
+    }
   }
   row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];
   int rowlen = row ? row->size : 0;
