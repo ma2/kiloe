@@ -3,6 +3,7 @@ test_program/*
 example/*
 build/*
 tests/*
+debug/*
 
 # ディレクトリのみ残す
 !example/
