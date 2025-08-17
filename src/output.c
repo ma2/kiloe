@@ -14,6 +14,21 @@
 #include "kiloe.h"
 
 /**
+ * 行番号表示幅を計算
+ */
+static int getLineNumberWidth() {
+    if (!Config.show_line_numbers || E.numrows == 0) return 0;
+    
+    int width = 1;  // 最低1桁
+    int num = E.numrows;
+    while (num >= 10) {
+        width++;
+        num /= 10;
+    }
+    return width + 1;  // +1はスペース用
+}
+
+/**
  * スクロール処理
  * カーソル位置に応じて表示領域を調整
  */
@@ -34,14 +49,17 @@ void editorScroll() {
         E.rowoff = E.cy - E.screenrows + 1;
     }
     
-    // 水平スクロール処理
+    // 水平スクロール処理（行番号幅を考慮）
+    int line_num_width = getLineNumberWidth();
+    int effective_cols = E.screencols - line_num_width;
+    
     if (E.rx < E.coloff) {
         // カーソルが表示領域の左にある場合
         E.coloff = E.rx;
     }
-    if (E.rx >= E.coloff + E.screencols) {
+    if (E.rx >= E.coloff + effective_cols) {
         // カーソルが表示領域の右にある場合
-        E.coloff = E.rx - E.screencols + 1;
+        E.coloff = E.rx - effective_cols + 1;
     }
 }
 
@@ -51,10 +69,19 @@ void editorScroll() {
  */
 void editorDrawRows(struct abuf *ab) {
     int y;
+    int line_num_width = getLineNumberWidth();  // 行番号幅を計算
+    
     for (y = 0; y < E.screenrows; y++) {
         int filerow = y + E.rowoff;
         
         if (filerow >= E.numrows) {
+            // 行番号表示が有効な場合はスペースを確保
+            if (line_num_width > 0) {
+                for (int i = 0; i < line_num_width; i++) {
+                    abAppend(ab, " ", 1);
+                }
+            }
+            
             // ファイル末尾を超えた行の処理
             if (E.numrows == 0 && y == E.screenrows / 3) {
                 // 空ファイルの場合はウェルカムメッセージを表示
@@ -75,10 +102,20 @@ void editorDrawRows(struct abuf *ab) {
                 abAppend(ab, "~", 1);
             }
         } else {
+            // 行番号を表示
+            if (line_num_width > 0) {
+                char line_num[16];
+                int num_len = snprintf(line_num, sizeof(line_num), "%*d ", 
+                                     line_num_width - 1, filerow + 1);
+                abAppend(ab, line_num, num_len);
+            }
+            
             // 実際のテキスト行の描画
             int len = E.row[filerow].rsize - E.coloff;
             if (len < 0) len = 0;
-            if (len > E.screencols) len = E.screencols;
+            // テキスト表示領域を行番号分だけ狭める
+            int text_cols = E.screencols - line_num_width;
+            if (len > text_cols) len = text_cols;
             
             char *c = &E.row[filerow].render[E.coloff];
             unsigned char *hl = &E.row[filerow].hl[E.coloff];
@@ -204,10 +241,12 @@ void editorRefreshScreen() {
     editorDrawStatusBar(&ab);
     editorDrawMessageBar(&ab);
 
-    // カーソルを正しい位置に移動
+    // カーソルを正しい位置に移動（行番号幅を考慮）
+    int line_num_width = getLineNumberWidth();
     char buf[32];
     snprintf(buf, sizeof(buf), "\x1b[%d;%dH", 
-        E.cy - E.rowoff + 1, E.rx - E.coloff + 1);
+        E.cy - E.rowoff + 1, 
+        E.rx - E.coloff + 1 + line_num_width);  // 行番号幅分右にシフト
     abAppend(&ab, buf, strlen(buf));
 
     // カーソル表示
