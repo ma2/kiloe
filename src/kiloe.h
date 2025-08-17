@@ -158,6 +158,7 @@ int getWindowSize(int *rows, int *cols);
 int is_utf8_continuation(unsigned char c);
 int move_to_next_char(char *str, int pos, int max);
 int move_to_prev_char(char *str, int pos);
+int utf8_char_len(unsigned char c);
 int get_char_width(char *str, int pos);
 
 /** 設定関数 */

@@ -69,6 +69,26 @@ int move_to_prev_char(char *str, int pos) {
 }
 
 /**
+ * utf8_char_len - UTF-8文字のバイト長を取得
+ * @c: UTF-8文字の最初のバイト
+ * 
+ * UTF-8エンコーディングの最初のバイトから文字のバイト長を判定
+ * - 0xxxxxxx: 1バイト（ASCII）
+ * - 110xxxxx: 2バイト
+ * - 1110xxxx: 3バイト（日本語文字など）
+ * - 11110xxx: 4バイト（絵文字など）
+ * 
+ * @return: 文字のバイト数（1-4）
+ */
+int utf8_char_len(unsigned char c) {
+    if (c < 0x80) return 1;         // 0xxxxxxx
+    if ((c & 0xE0) == 0xC0) return 2; // 110xxxxx
+    if ((c & 0xF0) == 0xE0) return 3; // 1110xxxx
+    if ((c & 0xF8) == 0xF0) return 4; // 11110xxx
+    return 1; // 不正なバイト、安全のため1として扱う
+}
+
+/**
  * get_char_width - UTF-8文字の表示幅を取得
  * @str: 対象文字列
  * @pos: 文字の開始位置

@@ -1,5 +1,13 @@
 kiloe.code-workspace
+test_program/*
 example/*
 build/*
+tests/*
+
+# ディレクトリのみ残す
 !example/
 !build/
+
+# cとhのみ残す
+!tests/*.c
+!tests/*.h

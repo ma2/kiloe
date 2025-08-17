@@ -7,8 +7,7 @@
 
 #include "kiloe.h"
 
-/* グローバル変数の定義 */
-struct editorConfig E;
+/* グローバル変数はmain.cで定義 */
 
 /**
  * die - エラー時の緊急終了処理
